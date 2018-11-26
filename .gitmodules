@@ -2,3 +2,7 @@
 	path = riscv-compliance
 	url = https://github.com/brouhaha/riscv-compliance.git
 	branch = glacial
+[submodule "zephyr"]
+	path = zephyr
+	url = https://github.com/brouhaha/zephyr.git
+	branch = glacial
