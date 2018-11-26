@@ -44,6 +44,8 @@ well-known minicomputers and microprocessors of the 1960s and 1970s:
 * DEC PDP-1 (1960): bit-mapped operate instruction (popularized by the later
 PDP-8, 1964)
 * DEC PDP-5 (1963): short-form page zero addressing (popularized by the PDP-8)
+* IBM System/360 Model 30 (1964): 32-bit processor architecture microcoded using 8-bit data paths
+* IBM System/360 Model 25 (1968): microcode and scratchpad stored in same physical memory array as user memory
 * DEC PDP-11 (1970): register indirect with postincrement memory addressing mode
 * General Instruments  PIC1650 (1976): skip on memory bit set or clear (popularized by Microchip PIC16C family)
 
@@ -111,6 +113,8 @@ installation details are beyond the scope of this README.
 Set the path to the tools (assuming installed in /opt/zephyr-sdk):
 ```
 export PATH=/opt/zephyr-sdk/sysroots/x86_64-pokysdk-linux/usr/bin/riscv32-zephyr-elf/:$PATH
+export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk
 ```
 
 ### clone repositories and set GLACIAL environment variable
@@ -138,3 +142,20 @@ make -C riscv-compliance RISCV_PREFIX=riscv32-unknown-elf- RISCV_TARGET=glacial 
 This will report "OK: 55/55" to indicate that all 55 rv32i tests passed, then will attempt to run
 rv32im tests, which is expected to fail, as Glacial only supports rv32i. This appears to be due to
 a design defect in the riscv-compliance top-level Makefile.
+
+### build Zephyr (NOT WORKING)
+```
+cd zephyr
+source zephyr-env.sh
+cd samples/philosophers
+mkdir build-glacial
+cd build-glacial
+cmake -DBOARD=glacial ..
+make
+cd ../synchronization
+mkdir build-glacial
+cd build-glacial
+cmake -DBOARD=glacial ..
+make
+cd ../..
+```
