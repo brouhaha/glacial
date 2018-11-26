@@ -132,8 +132,9 @@ make -C verilog
 
 ### run RV32I compliance tests on Verilator simulator
 ```
-make -C riscv-compliance RISCV_PREFIX=riscv32-unknown-elf- RISCV_TARGET=glacial RISCV_DEVICE=glacial
+make -C riscv-compliance RISCV_PREFIX=riscv32-unknown-elf- RISCV_TARGET=glacial RISCV_DEVICE=rv32i
 ```
 
 This will report "OK: 55/55" to indicate that all 55 rv32i tests passed, then will attempt to run
-rv32im tests, which is expected to fail, as Glacial only supports rv32i
+rv32im tests, which is expected to fail, as Glacial only supports rv32i. This appears to be due to
+a design defect in the riscv-compliance top-level Makefile.
