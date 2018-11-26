@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
     if args.microcode is None:
         udn = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
-        ufn = os.path.join(udn, 'ucode.hex')
+        ufn = os.path.join(udn, '..', 'ucode.hex')
         args.ucode = open(ufn, 'rb')
 
     ihex = IntelHex()
