@@ -18,7 +18,7 @@ Volume I: User Level ISA, Document Version 2.2, dated 2017-05-07.
 
 Glacial implements only the minimal subset of the Volume II:
 Privileged Architecture specification needed to pass the RV32I
-conformance tests and to run the Zephyr kernel. Glacial implements
+compliance tests and to run the Zephyr kernel. Glacial implements
 M-mode only. Numerous deviations from the Privileged Architecture
 specification exist; for example, all of the implmented CSRs are fully
 writeable.
@@ -76,8 +76,11 @@ Linux. The author specifically used Fedora 28 on an x86_64 platform.
 
 * Building the microcode and memory images requires GNU Make and Python 3.
 * Verilog simulation requires Verilator.
-* Compiling RISC-V programs including the conformance tests and Zephyr
-requires the Zephyr SDK.
+* Compiling the RISC-V compliance tests requires the toolchain provided
+by the RISC-V GNU Compiler Toolchain: https://github.com/riscv/riscv-gnu-toolchain
+(The compliance tests will not easily build with the Zephyr SDK
+toolchain due to problems with compiler options)
+* Compiling Zephyr requires the Zephyr SDK.
 * Building the FPGA image for the Lattice iCE40 UltraPlus requires
 Lattice iCEcube2 software.
 * Building the FPGA image for the Microsemi SmartFusion2 requires
@@ -92,9 +95,27 @@ Microsemi Libero SoC Design Software.
 
 ## Instructions
 
-### clone repository and set GLACIAL environment variable
+### install/build RISC-V GNU Compiler Toolchain
+This must be done to produce a 32-bit toolchain, which seems quite tricky,
+and the details are beyond the scope of this README.
+
+Set the path to the tools (assuming installed in /opt/riscv32):
 ```
-git clone https://github.com/brouhaha/glacial.git
+export PATH=/opt/riscv32/bin:$PATH
+```
+
+### install Zephyr SDK
+This must be done to get the toolchain used for the Zephyr demos. The
+installation details are beyond the scope of this README.
+
+Set the path to the tools (assuming installed in /opt/zephyr-sdk):
+```
+export PATH=/opt/zephyr-sdk/sysroots/x86_64-pokysdk-linux/usr/bin/riscv32-zephyr-elf/:$PATH
+```
+
+### clone repositories and set GLACIAL environment variable
+```
+git clone --recurse-submodules https://github.com/brouhaha/glacial.git
 cd glacial
 export GLACIAL=`pwd`
 ```
@@ -109,7 +130,10 @@ make -C ucode
 make -C verilog
 ```
 
-### run RV32I conformance tests on Verilator simulator
+### run RV32I compliance tests on Verilator simulator
 ```
-TBD
+make -C riscv-compliance RISCV_PREFIX=riscv32-unknown-elf- RISCV_TARGET=glacial RISCV_DEVICE=glacial
 ```
+
+This will report "OK: 55/55" to indicate that all 55 rv32i tests passed, then will attempt to run
+rv32im tests, which is expected to fail, as Glacial only supports rv32i
