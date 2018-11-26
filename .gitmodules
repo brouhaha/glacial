@@ -1,0 +1,4 @@
+[submodule "riscv-compliance"]
+	path = riscv-compliance
+	url = https://github.com/brouhaha/riscv-compliance.git
+	branch = glacial
