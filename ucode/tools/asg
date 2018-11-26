@@ -1,0 +1,596 @@
+#!/usr/bin/python3
+# Glacial microcode Assembler
+# Copyright 2016, 2018 Eric Smith <spacewar@gmail.com>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of version 3 of the GNU General Public License
+# as published by the Free Software Foundation.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import argparse
+import re
+import sys
+
+from glacial import Glacial
+from memory import Memory
+from intelhex import IntelHex
+from expressionparser import ExpressionParser
+
+
+class AssemblerError(Exception):
+    def __init__(self, sl, s=''):
+        self.sl = sl
+        if hasattr(sl, 'line_num'):
+            super().__init__(str(sl.line_num) + ': ' + s)
+        else:
+            super().__init__('end')
+
+class WrongOperandCount(AssemblerError):
+    def __init__(self, sl, mnemonic, actual, expected):
+        super().__init__(sl, '%s directive given wrong operand count %d, expected %d' % (mnemonic, actual, expected))
+
+class PhaseError(AssemblerError):
+    def __init__(self, sl, identifier, pass1_value, pass2_value):
+        super().__init__(sl, 'phase error, %s was %04x in pass 1, %04x in pass 2' % (identifier, pass1_value, pass2_value))
+
+class DataUndefinedDuringPhase2Error(AssemblerError):
+    def __init__(self, sl):
+        super().__init__(sl, 'undefined data during phase 2')
+
+class UndefinedSymbol(AssemblerError):
+    def __init__(self, sl, symbol):
+        super().__init__(sl, 'undefined symbol %s' % symbol)
+
+class UnimplementedDirective(AssemblerError):
+    def __init__(self, sl):
+        super().__init__(sl, 'unimplemented directive %s' % sl.mnemonic)
+
+class InvalidStrucNesting(AssemblerError):
+    def __init__(self, sl):
+        super().__init__(sl, 'invalid struc nesting')
+
+class SyntaxError(AssemblerError):
+    def __init__(self, sl, s):
+        super().__init__(sl, 'syntax error: ' + s)
+        
+class OperandSyntaxError(SyntaxError):
+    def __init__(self, sl, s):
+        super().__init__(sl, 'operand: ' + s)
+
+class ExpressionSyntaxError(SyntaxError):
+    def __init__(self, sl, s):
+        super().__init__(sl, 'expression: ' + s)
+
+class OperandsNotAppropriateForInstruction(AssemblerError):
+    pass
+
+class OperandOutOfRange(AssemblerError):
+    pass
+
+class UnknownMnemonic(SyntaxError):
+    pass
+
+class IdentifierWithoutColon(SyntaxError):
+    pass
+
+class DirectiveRequiresName(SyntaxError):
+    pass
+
+class DirectiveCannotHaveLabel(SyntaxError):
+    pass
+
+class UnterminatedIf(AssemblerError):
+    pass
+
+class ElseWithoutIf(AssemblerError):
+    pass
+
+class EndifWithoutIf(AssemblerError):
+    pass
+
+class NestedMacroDefinition(AssemblerError):
+    pass
+
+class UnterminatedMacro(AssemblerError):
+    pass
+
+class MacroRedefined(AssemblerError):
+    pass
+
+class MacroNotDefined(AssemblerError):
+    pass
+
+class WrongMacroArgumentCount(AssemblerError):
+    def __init__(self, sl, mnemonic, actual, expected):
+        super().__init__(sl, '%s directive given wrong operand count %d, expected %d' % (mnemonic, actual, expected))
+
+        
+
+class ReaderStackEntry:
+    def __init__(self, reader, name):
+        self.name = name
+        self.reader = reader
+        self.generator = reader.__iter__()
+        self.line_number = 0
+
+
+class ReaderStack:
+    def __init__(self):
+        self.stack = []
+
+    def push(self, reader, name):
+        self.stack.append(ReaderStackEntry(reader, name))
+
+    def set_actual_parameters(self, actuals):
+        # only for macros
+        self.stack[-1].generator.set_actual_parameters(actuals)
+
+    def get_line_number(self):
+        return self.stack[-1].line_number
+
+    def get_line_detail(self):
+        return ','.join(['%s:%d' % (r.name, r.line_number) for r in self.stack])
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while True:
+            if len(self.stack) == 0:
+                raise StopIteration
+            try:
+                v = next(self.stack[-1].generator)
+                self.stack[-1].line_number += 1
+                return v
+            except StopIteration as si:
+                self.stack.pop()
+
+
+class Macro:
+    def __init__(self, asg, formals):
+        self.asg = asg
+        self.formals = formals
+        self.lines = []
+
+    def add_line(self, pass_num, raw_line, scanned_line):
+        if scanned_line.mnemonic == 'endm':
+            return False
+        if pass_num == 1:
+            self.lines.append(raw_line)
+        return True
+
+    class MacroIterator:
+        def __init__(self, macro):
+            self.macro = macro
+            self.actuals = [ ]
+            self.line_num = 0
+
+        def set_actual_parameters(self, actuals):
+            if len(actuals) != len(self.macro.formals):
+                raise WrongMacroArgumentCount(self.macro.asg.sl, self.macro.asg.sl.mnemonic, len(actuals), len(self.macro.formals))
+            self.actuals = actuals
+            
+        def __next__(self):
+            if self.line_num >= len(self.macro.lines):
+                raise StopIteration
+            l = self.macro.lines[self.line_num]
+            for formal, actual in zip(self.macro.formals, self.actuals):
+                l = l.replace(formal, actual)
+            self.line_num += 1
+            return l
+
+    def __iter__(self):
+        return self.MacroIterator(self)
+
+
+class ASG:
+    def __init__(self, srcfile, listfile, hexfile):
+        self.rs = ReaderStack()
+
+        self.top_srcfile = srcfile
+        self.listfile = listfile
+        self.hexfile = hexfile
+
+        self.glacial = Glacial()
+
+        self.symtab = { }
+        self.memory = Memory()
+
+        self.pass_num = 0
+
+        self.line = None   # text of current line
+        self.sl = None     # current scanned line
+        self.pl = None     # current parsed line
+
+        self.ep = ExpressionParser()
+
+    def set_symbol(self, symbol, value, phase_check = False):
+        if phase_check and self.symtab[symbol] != value:
+            raise PhaseError(self.sl, symbol, self.symtab[symbol], value)
+        self.symtab[symbol] = value
+
+    def emit(self, bb):
+        pc = self.symtab['$']
+        l = len(bb)
+        if self.pass_num == 2:
+            #if -1 in bb:
+            #    raise DataUndefinedDuringPhase2Error(self.sl)
+            self.memory[pc:pc+l] = bb
+        self.set_symbol('$', pc + l)
+        
+
+    class Directive:
+        def process(self, asg):
+            raise UnimplementedDirective(asg.pl.sl)
+
+        def __init__(self,
+                     name_required = False,
+                     label_allowed = True,
+                     static_expression_required = False,
+                     skip_operand_evaluation = False):
+            self.name_required = name_required
+            self.label_allowed = label_allowed
+            self.static_expression_required = static_expression_required
+            self.skip_operand_evaluation = skip_operand_evaluation
+
+
+    class EQU_Directive(Directive):
+        def process(self, asg):
+            if not asg.cond:
+                return
+            if len(asg.pl.operands) != 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            asg.set_symbol(asg.sl.label, asg.pl.operands[0], asg.pass_num == 2)
+
+        def __init__(self):
+            super().__init__(name_required = True,
+                             label_allowed = False,
+                             static_expression_required = True)
+
+
+    class ORG_Directive(Directive):
+        def process(self, asg):
+            if not asg.cond:
+                return
+            if len(asg.pl.operands) != 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            asg.set_symbol('$', asg.pl.operands[0])
+            asg.listing_force_pc = True
+
+        def __init__(self):
+            super().__init__(name_required = False,
+                             label_allowed = False,
+                             static_expression_required = True)
+
+
+    class DS_Directive(Directive):
+        def process(self, asg):
+            if not asg.cond:
+                return
+            if len(asg.pl.operands) != 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            asg.set_symbol('$', asg.symtab['$'] + asg.pl.operands[0])
+            asg.listing_force_pc = True
+
+        def __init__(self):
+            super().__init__(name_required = False,
+                             label_allowed = True,
+                             static_expression_required = True)
+
+
+    class DB_Directive(Directive):
+        def process(self, asg):
+            if not asg.cond:
+                return
+            if len(asg.pl.operands) < 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            return bytearray(asg.pl.operands)
+
+
+    class DW_Directive(Directive):
+        def process(self, asg):
+            if not asg.cond:
+                return
+            if len(asg.pl.operands) < 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            return bytearray(*zip([v & 0xff for v in asg.pl.operands], [(v >> 8) & 0xff for v in asg.pl.operands]))
+
+
+    class IF_Directive(Directive):
+        def process(self, asg):
+            if len(asg.pl.operands) != 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            asg.cond_stack.append(asg.cond)
+            asg.cond = asg.pl.operands[0] != 0
+
+    class ELSE_Directive(Directive):
+        def process(self, asg):
+            if len(asg.pl.operands) != 0:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 0)
+            if len(asg.cond_stack) == 0:
+                raise ElseWithoutIf(asg.sl)
+            asg.cond = not asg.cond
+
+    class ENDIF_Directive(Directive):
+        def process(self, asg):
+            if len(asg.pl.operands) != 0:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 0)
+            if len(asg.cond_stack) == 0:
+                raise EndifWithoutIf(asg.sl)
+            asg.cond = asg.cond_stack.pop()
+
+    class END_Directive(Directive):
+        def process(self, asg):
+            if len(asg.pl.operands) != 1:
+                raise WrongOperandCount(asg.sl, asg.sl.mnemonic, len(asg.pl.operands), 1)
+            if asg.pass_num == 2:
+                pass
+            asg.start_addr = asg.pl.operands[0]
+
+    class MACRO_Directive(Directive):
+        def process(self, asg):
+            if asg.macro_definition_open is not None:
+                raise NestedMacroDefinition(asg.sl)
+            if asg.pass_num == 1:
+                if asg.sl.label in asg.macros:
+                    raise MacroRedefined(asg.sl)
+                asg.macro_definition_open = Macro(asg, asg.sl.operands)
+                asg.macros[asg.sl.label] = asg.macro_definition_open
+            else:
+                if asg.sl.label not in asg.macros:
+                    raise MacroNotDefined(asg.sl)
+                asg.macro_definition_open = asg.macros[asg.sl.label]
+
+        def __init__(self):
+            super().__init__(name_required = True,
+                             label_allowed = False,
+                             static_expression_required = False,
+                             skip_operand_evaluation = True)
+
+    directives = { 'db':      DB_Directive(),
+                   'ds':      DS_Directive(),
+                   'dw':      DW_Directive(),
+                   'else':    ELSE_Directive(),
+                   'end':     END_Directive(),
+# endm handled specially
+                   'endif':   ENDIF_Directive(),
+                   'equ':     EQU_Directive(),
+                   'if':      IF_Directive(),
+                   'macro':   MACRO_Directive(),
+                   'org':     ORG_Directive(),
+                  }
+
+
+    class ScannedLine:
+        def __init__(self, line_num, line):
+            self.line_num = line_num
+            self.line     = line
+            self.label    = None
+            self.colon    = None
+            self.mnemonic = None
+            self.operands = []
+            self.comment  = None
+
+
+    class ParsedLine:
+        def __init__(self):
+            self.inst     = None
+            self.operands = []
+
+
+    ident_re_s = '[a-z0-9?_@]+'
+
+    line_re = re.compile('((?P<label>' + ident_re_s + ')(?P<colon>:)?)?'
+                         '(\s+(?P<mnemonic>[a-z0-9_+]+)'
+                         '(\s+(?P<operands>([^,;\s]+)(\s*,\s*[^,;\s]+)*))?)?'
+                         '\s*(;(?P<comment>.*))?$')
+
+    operands_split_re = re.compile('\s*,\s*')
+
+    def scan_line(self):
+        self.line = self.line.rstrip().lower().expandtabs()
+        self.sl = ASG.ScannedLine(self.rs.get_line_number(), self.line)
+        match = self.line_re.match(self.line)
+        if not match:
+            raise SyntaxError(self.sl, '')
+        if match.group('operands') is not None:
+            self.sl.operands = self.operands_split_re.split(match.group('operands'))
+        else:
+            self.sl.operands = []
+        self.sl.label    = match.group('label')
+        self.sl.colon    = match.group('colon') is not None
+        self.sl.mnemonic = match.group('mnemonic')
+        self.sl.comment  = match.group('comment')
+
+
+    def parse_expression(self, s, undefined_ok = False):
+        try:
+            ast = self.ep.parse(s)
+        except Exception as e:
+            raise ExpressionSyntaxError(self.sl, s)
+        try:
+            value = ast.eval(self.symtab)
+        except ExpressionParser.UndefinedSymbol as us:
+            if undefined_ok:
+                value = 0
+            else:
+                raise UndefinedSymbol(self.sl, us)
+        return value
+
+
+    def parse_operand(self, s):
+        if s in Glacial.BranchCond:
+            return Glacial.OperandCondition(Glacial.BranchCond[s])
+        if s == '@x':
+            return Glacial.OperandIndirect(0)
+        if s == '@y':
+            return Glacial.OperandIndirect(1)
+        if s == '@x+':
+            return Glacial.OperandPostincrement(0)
+        if s == '@y+':
+            return Glacial.OperandPostincrement(1)
+        if s[0] == '#':
+            return Glacial.OperandImmediate(self.parse_expression(s[1:], undefined_ok = self.pass_num == 1))
+        e = self.parse_expression(s, undefined_ok = self.pass_num == 1)
+        return e
+
+
+
+    # return inst, directive, name
+    def parse_line(self):
+        self.pl = ASG.ParsedLine()
+
+        if self.macro_definition_open is not None:
+            if not self.macro_definition_open.add_line(self.pass_num, self.line, self.sl):
+                self.macro_definition_open = None
+            return
+
+        if self.sl.mnemonic is None:
+            self.pl.inst = None
+            if self.sl.label is not None:
+                if not self.sl.colon:
+                    raise IdentifierWithoutColon(self.sl, self.sl.label)
+                if asg.cond:
+                    self.set_symbol(self.sl.label, self.symtab['$'], phase_check = self.pass_num == 2)
+            return
+
+        if self.sl.mnemonic in self.macros:
+            if self.sl.label is not None:
+                if not self.sl.colon:
+                    raise IdentifierWithoutColon(self.sl, self.sl.label)
+                self.set_symbol(self.sl.label, self.symtab['$'], phase_check = self.pass_num == 2)
+            self.rs.push(self.macros[self.sl.mnemonic], name = self.sl.mnemonic)
+            self.rs.set_actual_parameters(self.sl.operands)
+            return
+
+        if self.sl.mnemonic in self.directives:
+            self.pl.inst = self.directives[self.sl.mnemonic]
+            if self.sl.label is None:
+                if self.pl.inst.name_required:
+                    raise DirectiveRequiresName(self.sl, self.sl.mnemonic)
+            elif self.sl.colon: # label
+                if not self.pl.inst.label_allowed:
+                    raise DirectiveCannotHaveLabel()
+                self.set_symbol(self.sl.label, self.symtab['$'], phase_check = self.pass_num == 2)
+            else: # name
+                if not self.pl.inst.name_required:
+                    raise IdentifierWithoutColon(self.sl, self.sl.label)
+            if self.pl.inst.skip_operand_evaluation:
+                return
+        elif asg.cond:
+            try:
+                self.pl.inst = self.glacial.mnemonic_search(self.sl.mnemonic)
+            except Glacial.UnknownMnemonic:
+                raise UnknownMnemonic(self.sl, self.sl.mnemonic)
+            if self.sl.label is not None:
+                if not self.sl.colon:
+                    raise IdentifierWithoutColon(self.sl, self.sl.label)
+                self.set_symbol(self.sl.label, self.symtab['$'], phase_check = self.pass_num == 2)
+        else:
+            return
+
+        self.pl.operands = [self.parse_operand(so) for so in self.sl.operands]
+
+
+    def assemble_line(self):
+        prior_pc = self.symtab['$']
+        if self.pl.inst == None:
+            bb = None
+        elif isinstance(self.pl.inst, ASG.Directive):
+            #print('%s: processing directive' % self.rs.get_line_detail(), self.pl.inst)
+            bb = self.pl.inst.process(self)
+        elif not asg.cond:
+            print('skipping line %d', self.sl.line_num)
+            return
+        else:
+            try:
+                bb = self.glacial.assemble_instruction(self.symtab['$'], self.pl.inst, self.pl.operands)
+            except Glacial.NoMatchingForm:
+                raise OperandsNotAppropriateForInstruction(self.sl, '')
+            except Glacial.OperandOutOfRange:
+                raise OperandOutOfRange(self.sl, '')
+        if bb is None:
+            bb = bytearray()
+        if self.pass_num == 2 and self.listfile:
+            s = '%5d  ' % self.sl.line_num
+            if len(bb) or self.listing_force_pc:
+                s += '%04x  ' % prior_pc
+                self.listing_force_pc = False
+            else:
+                s += '      '
+            for i in range(6):
+                if i < len(bb):
+                    s += '%02x ' % bb[i]
+                else:
+                    s += '   '
+            s += ' ' + self.line
+            print(s, file = self.listfile)
+        self.emit(bb)
+        
+
+    def assemble(self):
+        self.start_addr = 0x0000
+        self.macros = { }
+        for self.pass_num in range(1, 3):
+            print('pass %d' % self.pass_num)
+            self.pass_done = False
+            self.macro_definition_open = None
+            self.cond = True
+            self.cond_stack = []
+            self.symtab['$'] = 0
+            self.top_srcfile.seek(0)
+            self.rs.push(self.top_srcfile, name = self.top_srcfile.name)
+            for self.line in self.rs:
+                if self.pass_done:
+                    break
+                self.listing_force_pc = False
+                self.scan_line()
+                self.parse_line()
+                self.assemble_line()
+            if len(self.cond_stack) != 0:
+                raise UnterminatedIf(self)
+            if self.macro_definition_open != None:
+                raise UnterminatedMacro(self)
+                
+
+        if self.listfile is not None:
+            print(file = self.listfile)
+            for k in sorted(self.symtab):
+                if k != '$':
+                    print('%04x %-8s' % (self.symtab[k], k), file = self.listfile)
+            self.listfile.flush()
+            #self.listfile.close()
+            #x = self.listfile.tell()
+            #print(self.listfile.tell())
+
+        if self.hexfile is not None:
+            IntelHex().write(self.hexfile, self.memory, entry_addr = self.start_addr)
+            self.hexfile.flush()
+            #self.hexfile.close()
+            #x = self.hexfile.tell()
+            #print(self.hexfile.tell())
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description = 'Assembler for Glacial microarchitecture')
+
+    parser.add_argument('asmfile', type=argparse.FileType('r'),
+                        help = 'assembler source file')
+
+    parser.add_argument('-l', '--listing', type=argparse.FileType('w'),
+                        help = 'listing output file')
+
+    parser.add_argument('-o', '--output', type=argparse.FileType('w'),
+                        help = 'output file')
+
+    args = parser.parse_args()
+
+    asg = ASG(srcfile = args.asmfile, listfile = args.listing, hexfile = args.output)
+
+    asg.assemble()

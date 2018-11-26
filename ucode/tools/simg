@@ -1,0 +1,369 @@
+#!/usr/bin/python3
+# Glacial microcode simulator
+# Copyright 2018 Eric Smith <spacewar@gmail.com>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of version 3 of the GNU General Public License
+# as published by the Free Software Foundation.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import argparse
+import os
+import sys
+
+from glacial import Glacial, OT
+from memory import Memory
+from intelhex import IntelHex
+from elf import ElfFile
+from uart import UART
+
+
+rname = { 1: 'ra',
+          2: 'sp',
+          3: 'gp',
+          4: 'tp',
+          5: 't0',
+          6: 't1',
+          7: 't2',
+          8: 's0',
+          9: 's1',
+          10: 'a0',
+          11: 'a1',
+          12: 'a2',
+          13: 'a3',
+          14: 'a4',
+          15: 'a5',
+          16: 'a6',
+          17: 'a7',
+          18: 's2',
+          19: 's3',
+          20: 's4',
+          21: 's5',
+          22: 's6',
+          23: 's7',
+          24: 's8',
+          25: 's9',
+          26: 's10',
+          27: 's11',
+          28: 't3',
+          29: 't4',
+          30: 't5',
+          31: 't6' }
+
+csr_regs = { 'misa':     0x0088,
+             'mtvec':    0x0098,
+             'mepc':     0x00a8,
+             'mcause':   0x00ac,
+             'mbadaddr': 0x00b0 }
+
+class SimG:
+
+    def get_u16(self, addr):
+        return ((self.memory[addr+1] << 8) |
+                self.memory[addr])
+
+    def get_u32(self, addr):
+        return ((self.memory[addr+3] << 24) |
+                (self.memory[addr+2] << 16) |
+                (self.memory[addr+1] << 8) |
+                self.memory[addr])
+
+    def fetch_byte_pc(self):
+        b = self.memory[self.pc]
+        self.pc += 1
+        return b
+
+    def ind(self, index):
+        if index == 0:
+            return self.x
+        else:
+            return self.y
+
+    def postinc(self, index):
+        if index == 0:
+            prev = self.x
+            self.x = (self.x + 1) & 0xff
+        else:
+            prev = self.y
+            self.y = (self.y + 1) & 0xffffffff
+        return prev
+
+    def fetch_operand(self, operand_classes, fields):
+        return { OT.imm: lambda: fields['i'],
+                 OT.mem: lambda: self.memory[fields['m']],
+                 OT.ind: lambda: self.memory[self.ind(fields['x'])],
+                 OT.postinc: lambda: self.memory[self.postinc(fields['x'])] } [operand_classes[0]] ()
+
+    def store_result(self, operand_classes, fields, value):
+        addr = { OT.mem: lambda: fields['m'],
+                 OT.ind: lambda: self.ind(fields['x']),
+                 OT.postinc: lambda: self.postinc(fields['x']) } [operand_classes[0]] ()
+        self.memory[addr] = value
+
+    def inst_opr(self, operand_classes, fields):
+        opr = fields['i']
+        # phase 2
+        if opr & 0x002 != 0:  # tax, tay
+            if opr & 0x001 == 0:
+                self.x = self.accumulator
+            else:
+                self.y = (self.y >> 8) | (self.accumulator << (self.address_width - 8))
+        if opr & 0x008 != 0:  # sec, clc
+            self.carry = (opr >> 2) & 1
+
+        if opr & 0x040 != 0:  # ret
+            self.pc = self.return_address
+
+        if opr & 0x400 != 0:  # spidis, spien
+            self.spi.set_cs(opr & 0x001)
+
+        if opr & 0x800 != 0:  # spixfer
+            self.carry = self.spi.xfer_bit(self.accumulator >> 7) 
+
+        # phase 3
+        if opr & 0x100 != 0:  # uarttx
+            #print("cycle %d uart tx bit %d" % (self.cycle, self.accumulator & 1))
+            if self.uart is not None:
+                rxb = self.uart.tx(self.cycle, self.accumulator & 1)
+                if rxb is not None:
+                    if rxb == 0x04:
+                        self.run = False
+                    else:
+                        print(chr(rxb), end='')
+                        if rxb == 0x0a:
+                            sys.stdout.flush()
+
+        if opr & 0x020 != 0:  # rlc, rrc
+            if opr & 0x010 == 0:
+                # rotate left
+                self.accumulator = (self.accumulator << 1) + self.carry
+                self.carry = self.accumulator >> 8
+                self.accumulator &= 0xff
+            else:
+                # rotate right
+                self.accumulator += (self.carry << 8)
+                self.carry = self.accumulator & 1
+                self.accumulator >>= 1
+        
+        if opr & 0x080 != 0:  # addapc
+            self.pc += 2 * self.accumulator
+
+        if opr & 0x200 != 0:  # clrtick
+            self.tick_pending = 0
+
+    def inst_load(self, operand_classes, fields):
+        operand = self.fetch_operand(operand_classes, fields)
+        self.accumulator = operand
+
+    def inst_store(self, operand_classes, fields):
+        self.store_result(operand_classes, fields, self.accumulator)
+
+    def inst_and(self, operand_classes, fields):
+        operand = self.fetch_operand(operand_classes, fields)
+        self.accumulator &= operand
+
+    def inst_xor(self, operand_classes, fields):
+        operand = self.fetch_operand(operand_classes, fields)
+        self.accumulator ^= operand
+
+    def inst_adc(self, operand_classes, fields):
+        operand = self.fetch_operand(operand_classes, fields)
+        result = self.accumulator + operand + self.carry
+        self.accumulator = result & 0xff
+        self.carry = result >> 8
+
+    def inst_skb(self, operand_classes, fields):
+        bval = fields['i']
+        operand = self.fetch_operand(operand_classes, fields)
+        if ((operand >> fields['b']) & 0x01) == bval:
+            self.pc += 2
+
+    def inst_br(self, operand_classes, fields):
+        cond_sel = fields['c'] >> 1
+        cond_bit = fields['c'] & 1
+        cond = {
+            0: lambda: self.accumulator == 0,
+            1: lambda: self.carry,
+            2: lambda: self.ext_int_pending,
+            3: lambda: self.tick_pending
+            } [cond_sel] ()
+        if cond == cond_bit:
+            self.pc = fields['j']
+
+    def inst_jump(self, operand_classes, fields):
+        self.pc = fields['j']
+
+    def inst_call(self, operand_classes, fields):
+        self.return_address = self.pc
+        self.pc = fields['j']
+
+    def __init__(self, arch, memory, start_addr = 0x0000, address_width = 32, uart = None):
+        self.arch = arch
+        self.memory = memory
+        self.address_width = address_width
+        self.uart = uart
+
+        self.trace = False
+        self.halt_detection = False
+        self.breakpoints = set()
+
+        self.dispatch = { 'opr':     self.inst_opr,
+                          'store':   self.inst_store,
+                          'load':    self.inst_load,
+                          'and':     self.inst_and,
+                          'xor':     self.inst_xor,
+                          'adc':     self.inst_adc,
+                          'jump':    self.inst_jump,
+                          'call':    self.inst_call,
+                          'skb':     self.inst_skb,
+                          'br':      self.inst_br }
+
+        self.accumulator = 0x00
+        self.pc = start_addr
+        self.return_address = 0x0000
+        self.x = 0x00
+        self.y = 0x00000000
+        self.carry = 0
+        self.ext_int_pending = 0
+        self.tick_pending = 0
+
+    def dump_macro_state(self):
+        for i in range(32):
+            if (i == 0):
+                print(' ' * 19, end='')
+            else:
+                print(' : x%02d %3s %08x' % (i, rname[i], self.get_u32(i * 4)), end='')
+            if i % 4 == 3:
+                print()
+        mpc = self.get_u32(0xc8)
+        mir = self.get_u16(mpc)
+        print(' '.join('%s=%08x' % (csrn, self.get_u32(csr_regs[csrn])) for csrn in csr_regs))
+        print('cycle=%d MPC=%08x inst=%04x' % (self.cycle, mpc, mir))
+
+    def execute_single(self):
+        if self.halt_detection and self.pc == 0x01c2:
+            mpc = self.get_u32(0xc8)
+            mir = self.get_u32(mpc + 0x0a00)
+            if (mpc == self.prev_mpc) and (mir & 0x77 == 0x67):
+                self.run = False
+                return
+            self.prev_mpc = mpc
+        if self.trace and self.pc == 0x01c2:
+            self.dump_macro_state()
+        orig_pc = self.pc
+        self.ir = self.fetch_byte_pc() << 8
+        self.ir += self.fetch_byte_pc()
+        mnem, operand_classes, fields = self.arch.decode_instruction(self.ir)
+        if self.trace:
+            print("A=%02x C=%d X=%02x Y=%04x %04x: %04x " % (self.accumulator, self.carry, self.x, self.y, orig_pc, self.ir), end='')
+            print(mnem, operand_classes, fields)
+        self.dispatch[mnem](operand_classes, fields)
+        self.cycle += 4
+
+    def simulate(self):
+        self.prev_mpc = None
+        self.cycle = 0
+        self.run = True
+        while self.run:
+            if self.pc in self.breakpoints:
+                self.run = False
+            else:
+                self.execute_single()
+
+    def set_breakpoint(self, arg, val = True):
+        if val:
+            self.breakpoints.add(arg)
+        else:
+            self.breakpoints.remove(arg)
+
+    def set_trace(self, val):
+        self.trace = val
+
+    def set_halt_detection(self, val):
+        self.halt_detection = val
+
+
+def auto_int(x):
+    return int(x, 0)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description = 'Simulator for Glacial microarchitecture')
+
+    parser.add_argument('-m', '--memsize',
+                        type = int,
+                        default = 0x10000,
+    			help = 'memory size in bytes')
+
+    parser.add_argument('-t', '--trace',
+                        action = 'store_true',
+                        help = 'trace execution')
+
+    parser.add_argument('-b', '--breakpoint',
+                        type = auto_int,
+                        nargs = '+',
+                        help = 'breakpoint address')
+
+    parser.add_argument('--haltdetect',
+                        action = 'store_true',
+                        help = 'halt simulation on jal $')
+
+    parser.add_argument('-u', '--microcode',
+                        type = argparse.FileType('rb'),
+    			help = 'microcode object file')
+
+    parser.add_argument('-f', '--frequency',
+                        type = int,
+                        default = 27000000,
+                        help = 'frequency in Hz')
+
+    parser.add_argument('object',
+                        type = argparse.FileType('rb'),
+                        nargs = '*',
+                        help = 'RISC-V executable ELF file')
+
+    
+    args = parser.parse_args()
+
+    memory = Memory(size = args.memsize)
+    memory[0:args.memsize] = bytearray(args.memsize)
+    # XXX should be able to say memory[:] =
+
+    if args.microcode is None:
+        udn = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
+        ufn = os.path.join(udn, 'ucode.hex')
+        args.ucode = open(ufn, 'rb')
+
+    ihex = IntelHex()
+    ihex.read(args.ucode, memory)
+
+    entry_addr = ihex.entry_addr
+
+    riscv_mem_offset = memory[2] + (memory[3] << 8)
+
+    for f in args.object:
+        elf_file = ElfFile(f)
+        for segment in elf_file.segments:
+            memory[segment.paddr+riscv_mem_offset:segment.eaddr+1+riscv_mem_offset] = segment.data
+
+    uart = UART(args.frequency)
+
+    simg = SimG(arch = Glacial(), memory = memory, start_addr = entry_addr, address_width = 16, uart = uart)
+
+    simg.set_trace(args.trace)
+    simg.set_halt_detection(args.haltdetect)
+
+    if args.breakpoint != None:
+        for b in args.breakpoint:
+            simg.set_breakpoint(b)
+
+    simg.simulate()
+
+    print('simulated %d clock cycles, %f seconds' % (simg.cycle, simg.cycle/args.frequency), file = sys.stderr)

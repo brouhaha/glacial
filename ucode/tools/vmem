@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+# Glacial memory composer for Verilog simulation
+# Copyright 2018 Eric Smith <spacewar@gmail.com>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of version 3 of the GNU General Public License
+# as published by the Free Software Foundation.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import argparse
+import os
+import sys
+
+from glacial import Glacial, OT
+from memory import Memory
+from intelhex import IntelHex
+from elf import ElfFile
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description = 'memory composer for Glacial verilog simulation')
+
+    parser.add_argument('-m', '--memsize',
+                        type = int,
+                        default = 0x10000,
+    			help = 'memory size in bytes')
+
+    parser.add_argument('-u', '--microcode',
+                        type = argparse.FileType('rb'),
+    			help = 'microcode object file')
+
+    parser.add_argument('object',
+                        type = argparse.FileType('rb'),
+                        nargs = '*',
+                        help = 'RISC-V executable ELF file')
+
+    parser.add_argument('-o', '--output',
+                        type = argparse.FileType('w'),
+    			help = 'memory file for Verilog $readmemh')
+
+    
+    args = parser.parse_args()
+    print(args)
+
+    memory = Memory(size = args.memsize)
+    memory[0:args.memsize] = bytearray(args.memsize)
+    # XXX should be able to say memory[:] =
+
+    if args.microcode is None:
+        udn = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
+        ufn = os.path.join(udn, 'ucode.hex')
+        args.ucode = open(ufn, 'rb')
+
+    ihex = IntelHex()
+    ihex.read(args.ucode, memory)
+
+    entry_addr = ihex.entry_addr
+
+    riscv_mem_offset = memory[2] + (memory[3] << 8)
+
+    for f in args.object:
+        elf_file = ElfFile(f)
+        for segment in elf_file.segments:
+            memory[segment.paddr+riscv_mem_offset:segment.eaddr+1+riscv_mem_offset] = segment.data
+
+    for i in memory:
+        print('%02x' % i, file = args.output)
+    
