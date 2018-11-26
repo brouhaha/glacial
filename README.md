@@ -66,7 +66,8 @@ contest, and to Microsemi and Lattice for providing FPGA development boards.
 ## Hardware Requirements
 
 The Glacial core is written in non-vendor-specific Verilog, and should
-synthesize for any FPGA. Glacial has been specifically tested with:
+synthesize for any FPGA. Glacial was specifically intended to work with
+two of the FPGA boards specified for the contest:
 
 * Lattice iCE40 UltraPlus iCE40UP5K, using the iCE40 UltraPlus MDP board
 * Microsemi SmartFusion2 M2S025, using the Future Electronics Creative Development Board
