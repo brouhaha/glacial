@@ -38,7 +38,7 @@ implement a 32-bit architecture. For further information, see S.G. Tucker,
 "Microprogram control for System/360", IBM Systems Journal, 6(4), 1967,
 pp. 222-241.
 
-Some specific features of the Zephyr microarchitecture were drawn from
+Some specific features of the Glacial microarchitecture were drawn from
 well-known minicomputers and microprocessors of the 1960s and 1970s:
 
 * DEC PDP-1 (1960): bit-mapped operate instruction (popularized by the later
