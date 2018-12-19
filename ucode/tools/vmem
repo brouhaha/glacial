@@ -24,6 +24,20 @@ from intelhex import IntelHex
 from elf import ElfFile
 
 
+def write_readmemh(memory, file):
+    for i in memory:
+        print('%02x' % i, file = file)
+
+
+def write_coe(memory, file):
+    print('memory_initialization_radix = 16;', file = file)
+    print('memory_initialization_vector =', file = file)
+    for i in range(len(memory)):
+        term = ';' if i == (len(memory)-1) else ','
+        print('%02x%s' % (memory[i], term), file = file)
+
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'memory composer for Glacial verilog simulation')
 
@@ -36,6 +50,12 @@ if __name__ == '__main__':
                         type = argparse.FileType('rb'),
     			help = 'microcode object file')
 
+    parser.add_argument('-f', '--format',
+                        type = str,
+                        choices = ['readmemh', 'coe'],
+                        default = 'readmemh',
+                        help = 'output format')
+
     parser.add_argument('object',
                         type = argparse.FileType('rb'),
                         nargs = '*',
@@ -43,7 +63,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-o', '--output',
                         type = argparse.FileType('w'),
-    			help = 'memory file for Verilog $readmemh')
+    			help = 'output file')
 
     
     args = parser.parse_args()
@@ -56,10 +76,10 @@ if __name__ == '__main__':
     if args.microcode is None:
         udn = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
         ufn = os.path.join(udn, '..', 'ucode.hex')
-        args.ucode = open(ufn, 'rb')
+        args.microcode = open(ufn, 'rb')
 
     ihex = IntelHex()
-    ihex.read(args.ucode, memory)
+    ihex.read(args.microcode, memory)
 
     entry_addr = ihex.entry_addr
 
@@ -70,6 +90,8 @@ if __name__ == '__main__':
         for segment in elf_file.segments:
             memory[segment.paddr+riscv_mem_offset:segment.eaddr+1+riscv_mem_offset] = segment.data
 
-    for i in memory:
-        print('%02x' % i, file = args.output)
-    
+    if args.format == 'readmemh':
+        write_readmemh(memory, file = args.output)
+    elif args.format == 'coe':
+        write_coe(memory, file = args.output)
+
