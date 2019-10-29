@@ -21,7 +21,7 @@ Privileged Architecture specification needed to pass the RV32I
 compliance tests and to run the Zephyr kernel. Glacial implements
 M-mode only. Numerous deviations from the Privileged Architecture
 specification exist; for example, all of the implmented CSRs are fully
-writeable.
+writeable, though writing them may not have the intended effects.
 
 ## Microarchitecture inspiration
 
@@ -48,6 +48,9 @@ PDP-8, 1964)
 * IBM System/360 Model 25 (1968): microcode and scratchpad stored in same physical memory array as user memory
 * DEC PDP-11 (1970): register indirect with postincrement memory addressing mode
 * General Instruments  PIC1650 (1976): skip on memory bit set or clear (popularized by Microchip PIC16C family)
+
+The doc directory contains a Glacial Microarchitecture document in LaTeX,
+available in PDF form in the  [Glacial wiki](https://github.com/brouhaha/glacial/wiki).
 
 ## Acknowledgements
 
