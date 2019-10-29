@@ -1,0 +1,687 @@
+\documentclass[letterpaper]{report}
+\usepackage{bytefield}
+
+\begin{document}
+\title{Glacial Microarchitecture}
+\author{Eric Smith}
+\date{October 28, 2019}
+\maketitle
+
+\chapter{Introduction}
+
+This document describes the microarchitecture of Glacial, a highly
+vertically-microcoded processor. When running the standard microcode,
+Glacial implements a RISC-V RV32I processor. However, the Glacial
+microarchitecture may be useful for other applications unrelated to
+RISC-V.
+
+In the rest of this document, the use of the name "Glacial" will be
+in reference to the Glacial microarchitecture, without regard to
+the normal microcode implementing the RISC-V architecture.
+
+\section{Limitations}
+
+Glacial was designed to use minimal hardware resources, e.g., FPGA
+logic elements, and was designed to support hand-written assembly code,
+rather than a high-level language. It is missing many features
+commonly present in other processor architectures. For example:
+
+\begin{itemize}
+  \item There is an adc instruction (add with carry), but no subtract
+instruction, because subtraction can be accomplished by complementing
+the subtrahend then adding.
+
+  \item There are instructions for logical and and exclusive or, but not for
+logical or. By De Morgan's law, the logical and and exclusive or
+instructions can be used to accomplish a logical or function.
+
+  \item There is a postincrement address mode, but no corresponding predecrement
+mode
+
+  \item Glacial has a single memory address space of 64 KiB. Glacial can only
+execute instructions from the first 4 KiB of the memory; the remaining
+60 KiB is used for data (or macroinstructions) only.
+
+  \item The X index register, and instructions using absolute addressing of data,
+can only address the first 256 bytes of memory. The rest of memory can
+only be accessed as data by use of the Y index register.
+
+  \item There is only one level of subroutine stack.
+\end{itemize}
+
+\section{Simple architectural enhancements}
+
+Several relatively simple architectural enhancements could be made,
+which might make Glacial more suitable for other applications:
+
+\begin{itemize}
+
+  \item More index registers could be added. The instruction encoding for the
+indexed addressing modes currently does not use bits 7..1 of the
+instruction.
+
+  \item The address space for data could be increased, e.g., to 16 MiB
+or 4 GiB, by making the Y index register (and/or other added index
+registers) wider.
+
+  \item The size of the return stack could be increased to allow
+multiple levels of subroutine calls.
+
+  \item If it is desired to use ROM starting at address 0, the X index
+register could have a fixed but non-zero high byte to address
+RAM. This would be similar to the 6502 microprocessor's stack pointer,
+which is 8 bits, but has a high byte of 0x01.
+
+\end{itemize}
+
+
+\chapter{Programmer's Model}
+
+Glacial has six programmer-visible registers:
+
+\bigskip
+
+\begin{tabular}{ | c | c | }
+  \hline
+  register        & bits \\
+  \hline \hline
+  program counter & 12 (LSB always zero) \\
+  \hline
+  return address  & 12 (LSB always zero) \\
+  \hline
+  x index         & 8 \\
+  \hline
+  y index         & 16 \\
+  \hline
+  accumulator     & 8 \\
+  \hline
+  carry flag      & 1 \\
+  \hline
+\end{tabular}
+
+\bigskip
+
+Glacial has ten basic instructions, though one of them, opr (operate)
+performs various miscellaneous functions:
+
+\bigskip
+
+\begin{tabular}{ | c | c | }
+  \hline
+  mnemonic & description \\
+  \hline \hline
+  opr      & operate (miscellaneous functions) \\
+  \hline
+  store    & store the accumulator into a memory byte \\
+  \hline
+  load     & load a byte from memory into the accumulator \\
+  \hline
+  and      & logically and a byte from memory into the accumulator \\
+  \hline
+  xor      & logically exclusive or a byte from memory into the accumulator \\
+  \hline
+  adc      & add a byte from memory and carry into the accumulator \\
+  \hline
+  jump     & unconditional jump \\
+  \hline
+  call     & unconditional subroutine call \\
+  \hline
+  skb      & skip next instruction, conditional on the state of an accumulator bit \\
+  \hline
+  br       & conditional branch \\
+  \hline
+\end{tabular}
+
+\bigskip
+
+Glacial has five basic memory addressing modes, not all of which are
+applicable to all instructions:
+
+\bigskip
+
+\begin{itemize}
+  \item immediate 8-bit
+  \item absolute 8-bit
+  \item index register
+  \item index register with postincrement
+  \item branch, absolute 13-bit address, even addresses only
+\end{itemize}
+
+\chapter{Instruction Formats and Memory Addressing Modes}
+
+\section{immediate 8-bit}
+
+The immediate addressing mode embeds an 8-bit operand direction in the
+instruction.
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitbox{8}{opcode} &
+  \bitbox{8}{immediate operand}
+\end{bytefield}
+
+\section{absolute 8-bit}
+
+The absolute addressing mode allows access to any byte within the first 256
+bytes of memory (0x0000 through 0x00ff) by a fixed address embedded in the
+instruction.
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitbox{8}{opcode} &
+  \bitbox{8}{absolute address}
+\end{bytefield}
+
+\section{index register}
+
+The indexed addressing mode allows access to the byte of memory pointed to
+by an index register, x or y. The x index register can only point
+to the first 256 bytes of memory (0x0000 through 0x00ff).
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitbox{8}{opcode} &
+  \bitboxes*{1}{0000000} &
+  \bitbox{1}{idx}
+\end{bytefield}
+
+\bigskip
+
+The idx field value is 0 for the x index register, and 1 for the y index
+register.
+
+\section{index register autoincrement}
+
+The index register autoincrement addressing mode allows access to the byte
+of memory pointed to by an index register, x or y, and after the access,
+increments the index register. The x index register can only point
+to the first 256 bytes of memory (0x0000 through 0x00ff), and if incremented
+past 0xff, x will wrap to 0x0000.
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitbox{8}{opcode} &
+  \bitboxes*{1}{0000000} &
+  \bitbox{1}{idx}
+\end{bytefield}
+
+\bigskip
+
+The idx field value is 0 for the x index register, and 1 for the y index
+register.
+
+\section{branch}
+
+The branch instructions include 11 bits of a 12-bit absolute address of
+the branch target. Since instructions must be 16-bit aligned, the branch
+target absolute address is always even, so the LSB is omitted from the
+instruction encoding.
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitbox{5}{opcode} &
+  \bitbox{11}{absolute address / 2}
+\end{bytefield}
+
+\chapter{Instructions}
+
+\section{opr: operate}
+
+The opr (operate) instruction is a catch-all for miscellaneous functions,
+with a bit-mapped opcode containing bits or bitfields encoding those
+functions. This allows the combination of multiple functions into a
+single instruction. This technique was used in the 1960s and 1970s by
+the Digital Equipment Corporation 18-bit and 12-bit minicomputers such
+as the PDP-1 and PDP-8, where it was called "microcoding" (similar to
+horizontal microcode).
+
+\bigskip
+
+\begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+  \bitheader{0-15} \\
+  \bitboxes*{1}{0000} &
+  \bitbox{3}{rsv} &
+  \bitbox{1}{utx} &
+  \bitbox{1}{apc} &
+  \bitbox{1}{ret} &
+  \bitbox{2}{rot} &
+  \bitbox{2}{cy} &
+  \bitbox{2}{idx}
+\end{bytefield}
+
+\bigskip
+
+\begin{tabular}{ | l | l | l | }
+  \hline
+  bits  & mnemonic & function \\
+  \hline \hline
+  11..9 & reserved \\
+  \hline
+  8     & utx      & UART transmit LSB of accumulator \\
+  \hline
+  7     & apc      & add accumulator to PC \\
+  \hline
+  6     & ret      & return from subroutine \\
+  \hline
+  5..4  & 00 = nop, 10 = rlc, 11 = rrc & rotate left or right with carry \\
+  \hline
+  3..2  & 00 = nop, 10 = clc, 11 = sec & clear or set carry \\
+  \hline
+  1..0  & 00 = nop, 10 = tax, 11 = tay & transfer accumulator to index register \\
+  \hline
+\end{tabular}
+
+\bigskip
+
+Some useful combinations:
+
+\bigskip
+
+\begin{tabular}{ | l | l | l | l | }
+  \hline
+  opcode & functions & mnemonic & function \\
+  \hline \hline
+  0x028 & clc rol & lsl & logical shift left accumulator \\
+  \hline
+  0x038 & clc ror & lsr & logical shift right accumulator \\
+  \hline
+  0x0c0 & ret apc & retadd & return skipping word count in accumulator \\
+  \hline
+  0x13c & utx sec rrc & uarttxr & UART transmit LSB of accumulator \\
+  \hline
+\end{tabular}
+
+\bigskip
+
+The carry operations are executed before the rotate operations.
+
+The tax and tay operations transfer the accumulator contents to the index
+register. Since x is an 8-bit register, tax simply performs a copy. The
+y register, on the other hand, is a 16-bit register, so in order to allow
+loading the entire y register, each use of the tay operation shifts y right
+by eight bits and puts the accumulator value into the high 8 bits of y.
+
+For example, if the y register contains 0x1234 and the accumulator contains
+0x78, after one tay instruction the y register will contain 0x7812.
+
+The utx operation is specifically intended for use in the uarttxr combination,
+which is used for a bit-banged UART transmit output. This was particularly
+useful for the RISC-V conformance tests, but may not be suitable for a real
+application. The uarttxr instruction should be used once with the LSB of the
+accumulator containing zero, to generate a start bit, then the byte to be
+transmitted should be loaded into the accumulator, and uarttxr executed nine
+more times, with appropriate delays between uarttxr instructions for the
+serial bit timing desired.
+
+The apc operation is useful for jump tables. Combined with ret to form the
+retadd instruction, it is useful as a return from subroutines that have
+multiple exits, with the accumulator specifying a number of instructions
+to skip beyond the normal return location.
+
+\section{store: store accumulator to memory}
+
+The store instruction is used to store the contents of the accumulator
+register into a byte of memory.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{00010000} &
+      \bitbox{8}{absolute address}
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{00100000} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{00110000} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{load: load accumulator from memory}
+
+The load instruction is used to load the contents of a byte of memory
+into the accumulator register.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  immediate &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{01000000} &
+      \bitbox{8}{immediate operand}
+    \end{bytefield}
+  }
+  \\
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01010000} &
+      \bitbox{8}{absolute address}
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01100000} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01110000} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{and: and memory with accumulator}
+
+The and instruction is used to logically and the contents of a byte of
+memory into the accumulator register.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  immediate &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{01000001} &
+      \bitbox{8}{immediate operand}
+      
+    \end{bytefield}
+  }
+  \\
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01010001} &
+      \bitbox{8}{absolute address}
+      
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01100001} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01110001} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{xor: exclusive or memory with accumulator}
+
+The xor instruction is used to logically exclusive-or the contents of a byte
+of memory into the accumulator register.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  immediate &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{01000010} &
+      \bitbox{8}{immediate operand}
+      
+    \end{bytefield}
+  }
+  \\
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01010010} &
+      \bitbox{8}{absolute address}
+      
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01100010} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01110010} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{adc: add memory to accumulator with carry}
+
+The adc instruction is used to add the contents of a byte of memory
+and the carry flag into the accumulator register, and will set the
+carry flag based on the result of the addition.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  immediate &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{01000011} &
+      \bitbox{8}{immediate operand}
+      
+    \end{bytefield}
+  }
+  \\
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01010011} &
+      \bitbox{8}{absolute address}
+      
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01100011} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{01110011} &
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{jump: unconditional jump}
+
+The jump instruction performs an unconditional jump to the target address.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{10000} &
+      \bitbox{11}{absolute address / 2}
+      
+    \end{bytefield}
+  }
+\end{tabular}
+
+\section{call: unconditional subroutine call}
+
+The call instruction pushes the address of the next sequential instruction
+into the return register, and branches to the target address.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{10001} &
+      \bitbox{11}{absolute address / 2}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\bigskip
+
+Glacial normally has only one level of return stack, so nested
+subroutine calls will not work.
+
+Returning from a subroutine is accomplished by the ``ret'' function of the
+opr (operate) instruction.
+
+\section{skb: skip on bit}
+
+\bigskip
+
+\begin{tabular}{ r c }
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{1001} &
+      \bitbox{1}{i}
+      \bitbox{3}{bit}
+      \bitbox{8}{absolute address}
+    \end{bytefield}
+  }
+  \\
+  indexed &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{1010} &
+      \bitbox{1}{i}
+      \bitbox{3}{bit}
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+  \\
+  indexed postincrement &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitboxes*{1}{1011} &
+      \bitbox{1}{i}
+      \bitbox{3}{bit}
+      \bitboxes*{1}{0000000} &
+      \bitbox{1}{x}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\bigskip
+
+The ``i'' bit determines the polarity of the bit test and the ``bit'' field
+determines which bit of the operand is tested, with 0 being the least
+significant bit. The skip will occur if the ``i'' bit matches the bit
+being tested.
+
+\section{br: conditional branch}
+
+The conditional branch instruction will branch to the target address
+if the condition is true. Otherwise execution will continue sequentially.
+
+\bigskip
+
+\begin{tabular}{ r c }
+  absolute &
+  {
+    \begin{bytefield}[endianness=big,bitwidth=1.5em]{16}
+      \bitheader{0-15} \\
+      \bitboxes*{1}{11} &
+      \bitbox{3}{cond}
+      \bitbox{11}{absolute address / 2}
+    \end{bytefield}
+  }
+\end{tabular}
+
+\bigskip
+
+The ``cond'' field determines which condition is tested.
+
+\bigskip
+
+\begin{tabular}{ | c | l | }
+  \hline
+  cond & condition \\
+  \hline \hline
+  0    & accumulator non-zero \\
+  \hline \hline
+  1    & accumulator zero \\
+  \hline \hline
+  2    & no carry \\
+  \hline \hline
+  3    & carry \\
+  \hline \hline
+  4    & no external interrupt \\
+  \hline \hline
+  5    & external interrupt \\
+  \hline \hline
+  6    & no clock tick \\
+  \hline \hline
+  7    & clock tick \\
+  \hline \hline
+\end{tabular}
+
+\end{document}
